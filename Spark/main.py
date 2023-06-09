@@ -1,5 +1,6 @@
 # Import SparkSession
 from pyspark.sql import SparkSession, Window
+import os
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 
@@ -9,87 +10,74 @@ spark = SparkSession.builder \
     .appName("SparkByExamples.com") \
     .getOrCreate()
 
-# Input data sets are read and placed in a data frame
-input_df = spark.read.option("header", True).csv("resources/exercise.csv")
+# Base path of the "resources" directory
+base_path = os.path.join(os.getcwd(), "resources")
+# os is the Python module for operating system path and directory manipulation
+# os.getcwd() is a function that returns the path of the Current Working Directory (CWD)
+# os.path.join() is a function used to join parts of paths into a single path
 
-# a) Numero de transacciones totales del dia
-num_transactions = input_df.count()
+# Get the list of folders inside "resources"
+folders = os.listdir(base_path)
 
-# The number is formatted to have the thousands separator
-num_transactions_formatted = "{:,}".format(num_transactions)
-print("Numero de transacciones totales del dia:", num_transactions_formatted)
+# Process each folder
+total_transactions = 0
+total_amount = 0.0
+
+for folder in folders:
+    folder_path = os.path.join(base_path, folder)
+    csv_files = [file for file in os.listdir(folder_path) if file.endswith(".csv")]
+
+    for csv_file in csv_files:
+        file_path = os.path.join(folder_path, csv_file)
+        input_df = spark.read.csv(file_path, header=True, inferSchema=True)
+        num_transactions = input_df.count()
+        amount_sum = \
+            input_df.select(sum(regexp_extract(col("amount"), r"(\d+(\.\d+)?)", 1).cast(DoubleType()))).first()[0]
+        total_transactions += num_transactions
+        total_amount += amount_sum
+
+# a) Numero de transacciones totales de la semana
+total_transactions_formatted = "{:,}".format(total_transactions)
+print("Transacciones totales de la semana:", total_transactions_formatted)
 
 # b) Calculo de la media de gasto por sexo
-# The original values are replaced by numeric values thanks to the regular expression,
-# in addition those values are passed to decimal numbers without the euro symbol
-df_formatted = input_df.withColumn("amount", regexp_extract(col("amount"), r"(\d+(\.\d+)?)", 1).cast(DoubleType()))
-
-# The data are grouped by sex and then the average is calculated with two decimal places
-average_expenditure_sex = df_formatted.groupby("gender").agg(round(avg("amount"), 2).alias("average_expense"))
-
-# Results are displayed
-average_expenditure_sex.show()
+average_expense_sex = spark.read.csv(file_path, header=True, inferSchema=True).groupBy("gender").agg(
+    round(avg(regexp_extract(col("amount"), r"(\d+(\.\d+)?)", 1).cast(DoubleType())), 2).alias("average_expense"))
+average_expense_sex = average_expense_sex.withColumn("average_expense", concat(col("average_expense"), lit("€")))
+print("Media de gasto por sexo de la semana:")
+average_expense_sex.show()
 
 # c) Calculo de la media de gasto por pais (España, Argentina, Francia, Alemania, Brasil, Portugal) y total (independiente del pais)
-df_formatted = input_df.withColumn("amount", regexp_extract(col("amount"), r"(\d+(\.\d+)?)", 1).cast(DoubleType()))
-country_average_expenditure = df_formatted.groupby("country").agg(round(avg("amount"), 2).alias("average_expense"))
-average_expenditure_total_countries = df_formatted.agg(
-    round(avg("amount"), 2).alias("average_expenditure_total_countries"))
-country_average_expenditure.show()
+average_expense_country = spark.read.csv(file_path, header=True, inferSchema=True).groupBy("country").agg(
+    round(avg(regexp_extract(col("amount"), r"(\d+(\.\d+)?)", 1).cast(DoubleType())), 2).alias("average_expense"))
+average_expense_country = average_expense_country.withColumn("average_expense",
+                                                             concat(col("average_expense"), lit("€")))
+print("Media de gasto por pais de la semana:")
+average_expense_country.show()
+average_expenditure_total_countries = spark.read.csv(file_path, header=True, inferSchema=True).agg(
+    round(avg(regexp_extract(col("amount"), r"(\d+(\.\d+)?)", 1).cast(DoubleType())), 2).alias("average_expense_total"))
+average_expenditure_total_countries = average_expenditure_total_countries.withColumn("average_expense_total",
+                                                                                     concat(
+                                                                                         col("average_expense_total"),
+                                                                                         lit("€")))
+print("Gasto medio total de todos los paises de la semana:")
 average_expenditure_total_countries.show()
 
 # d) Los 5 servicios donde se ha producido mas gasto en: España, Argentina y Alemania
-# The countries are filtered
-df_filtered = df_formatted.filter(df_formatted.country.isin("Spain", "Argentina", "Germany"))
+country_filter = ["Spain", "Argentina", "Germany"]
 
-# The total cost per service in each country is calculated
-total_expenditure_by_service = df_filtered.groupby("country", "retail_service").agg(
-    sum("amount").alias("total_expenditure"))
+top_services = spark.read.csv(file_path, header=True, inferSchema=True) \
+    .filter(col("country").isin(country_filter)) \
+    .groupBy("country", "retail_service") \
+    .agg(sum(regexp_extract(col("amount"), r"(\d+(\.\d+)?)", 1).cast(DoubleType())).alias("total_expenditure")) \
+    .orderBy("country", desc("total_expenditure"))
+top_services_euro = top_services.withColumn("total_expenditure", concat(col("total_expenditure"), lit("€")))
 
-# Rank is added to each service by country based on total spend, top five services are filtered out, then rank column is removed
-largest_services_by_country = total_expenditure_by_service.withColumn("rank", dense_rank().over(
-    Window.partitionBy("country").orderBy(desc("total_expenditure")))
-                                                                      ).filter(col("rank") <= 5).drop("rank")
-# Results are displayed
-largest_services_by_country.show()
+for country in country_filter:
+    print(f"Servicios donde se ha producido mas gasto en {country}:")
+    # f at the beginning of the string indicates that it is a Python-formatted string, also known as f-string
+    top_services_euro.filter(col("country") == country).limit(5).show()
 
-# e) Cual es el porcentaje de uso de cada tipo de tarjeta (Visa, Mastercard, AmericanExpress)
-# The DataFrame is filtered by Visa, Mastercard and AmericanExpress cards
-df_filtered = input_df.filter(input_df.card.isin("visa", "mastercard", "americanexpress"))
+# e) Cual es el porcentaje de uso de cada tipo de tarjeta (visa, mastercard, americanexpress)
 
-# The total number of transactions for each type of card is calculated
-card_counts = df_filtered.groupby("card").agg(count("*").alias("total_transactions"))
-
-# The percentage of use of each type of card is calculated
-total_transactions = df_filtered.count()
-card_percentages = card_counts.withColumn("percentage",
-                                          round(card_counts.total_transactions / total_transactions * 100, 2))
-
-# The percent symbol is added to the end of the value
-card_percentages = card_percentages.withColumn("percentage", concat(card_percentages.percentage, lit("%")))
-
-# Results are displayed
-card_percentages.show()
-
-# f) Cual es la hora del dia a la que mas se compra? Y a la que menos? - Para cada uno de los 6 paises
-# The time of day is extracted
-df_hour = input_df.withColumn("hour_of_day", concat(hour("timestamp"), lit(":00")))
-
-# The purchase count is calculated by country and time of day
-shopping_time = df_hour.groupBy("country", "hour_of_day").count()
-
-# A row number is assigned to each hour of the day within each country based on the purchase count
-window_spec = Window.partitionBy("country").orderBy(desc("count"))
-ranked_hours = shopping_time.withColumn("rank", row_number().over(window_spec))
-
-# The hours of the day with the highest and lowest number of purchases are filtered for each country
-max_hours = ranked_hours.filter(col("rank") == 1).drop("rank").withColumnRenamed("hour_of_day", "most_purchased_hour")
-min_hours = ranked_hours.filter(col("rank") == 24).drop("rank").withColumnRenamed("hour_of_day", "least_purchased_hour")
-
-# The desired columns are selected to display the results
-max_hours = max_hours.select("country", "most_purchased_hour")
-min_hours = min_hours.select("country", "least_purchased_hour")
-
-# Results are displayed
-max_hours.show()
-min_hours.show()
+# f) Cual es la hora de la semana a la que mas se compra? Y a la que menos? - Para cada uno de los 6 paises
