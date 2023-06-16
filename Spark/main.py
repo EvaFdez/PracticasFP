@@ -79,5 +79,15 @@ for country in country_filter:
     top_services_euro.filter(col("country") == country).limit(5).show()
 
 # e) Cual es el porcentaje de uso de cada tipo de tarjeta (visa, mastercard, americanexpress)
+card_percentage = input_df.groupBy("card").count()
+total_transactions = input_df.count()
+
+card_percentage = card_percentage.withColumn("percentage",
+                                             round((col("count") / total_transactions * 100), 2))
+card_percentage = card_percentage.withColumn("percentage",
+                                             concat(col("percentage"), lit("%")))
+
+card_percentage = card_percentage.select("card", "percentage")
+card_percentage.show()
 
 # f) Cual es la hora de la semana a la que mas se compra? Y a la que menos? - Para cada uno de los 6 paises
